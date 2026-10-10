@@ -1,0 +1,78 @@
+name: Samguk SourceBank — independently verify download
+on:
+  push:
+    paths:
+      - '.github/workflows/verify-sourcebank.yml'
+  workflow_dispatch:
+permissions:
+  actions: read
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Download previously uploaded source ZIP
+        uses: actions/download-artifact@v4
+        with:
+          name: Samguk-Full-SourceBank
+          run-id: 38093526300
+          github-token: ${{ github.token }}
+          path: downloaded
+      - name: Independent integrity verification of final ZIP
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib, io, json, pathlib, zipfile
+          from datetime import datetime, timezone
+          
+          archive = pathlib.Path("downloaded/Samguk_Full_Original_SourceBank.zip")
+          assert archive.is_file(), "downloaded source bank ZIP missing"
+          sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+          report = {"verified_at": datetime.now(timezone.utc).isoformat(), "zip_sha256": sha256, "zip_size_bytes": archive.stat().st_size, "projects": [], "total_files": 0, "results": []}
+          with zipfile.ZipFile(archive, "r") as out:
+              assert out.testzip() is None, "outer archive CRC check failed"
+              path = "Samguk_SourceBank/metadata/SOURCE_MANIFEST.json"
+              manifest = json.loads(out.read(path))
+              assert len(manifest) == 10, f"expected 10 repos, found {len(manifest)}"
+              assert sum(int(x["file_count"]) for x in manifest) == 23863, "unexpected source file total"
+              source_keys = set(out.namelist())
+              for ent in manifest:
+                  name, repo, commit = ent["name"], ent["repo"], ent["commit"]
+                  original_path = f"Samguk_SourceBank/archives/{name}-{commit}.zip"
+                  original_bytes = out.read(original_path)
+                  assert hashlib.sha256(original_bytes).hexdigest() == ent["original_archive_sha256"], f"original archive SHA mismatch {repo}"
+                  with zipfile.ZipFile(io.BytesIO(original_bytes), "r") as original:
+                      assert original.testzip() is None, f"source archive CRC failure {repo}"
+                      infos = [i for i in original.infolist() if not i.is_dir()]
+                      assert len(infos) == ent["file_count"], f"source count mismatch {repo}"
+                      assert sum(i.file_size for i in infos) == ent["uncompressed_bytes"], f"source sizes mismatch {repo}"
+                      root = infos[0].filename.split("/")[0]
+                      license_data = original.read(root + "/" + ent["license_file"])
+                      blob = hashlib.sha1(b"blob " + str(len(license_data)).encode() + b"\0" + license_data).hexdigest()
+                      assert blob == ent["license_blob"], f"license blob mismatch {repo}"
+                      for inf in infos:
+                          relative = inf.filename.split("/", 1)[1]
+                          assert relative and not relative.startswith("/") and ".." not in pathlib.PurePosixPath(relative).parts, "unsafe path"
+                          entry = f"Samguk_SourceBank/sources/{name}/{relative}"
+                          assert entry in source_keys, f"missing expanded source {entry}"
+                          actual_info = out.getinfo(entry)
+                          assert actual_info.file_size == inf.file_size, f"source length mismatch: {entry}"
+                          assert actual_info.CRC == inf.CRC, f"source checksum mismatch: {entry}"
+                  report["projects"].append({"repository": repo, "commit": commit, "original_zip_sha256": ent["original_archive_sha256"], "files": ent["file_count"], "license_hash_verified": True, "expanded_files_crc_verified": True})
+                  report["total_files"] += ent["file_count"]
+                  print(f"OK {repo} {ent['file_count']} files", flush=True)
+          report["results"] = ["downloaded_GitHub_Actions_artifact", "outer_zip_crc_pass", "10_pinned_archives_sha256_pass", "10_license_blob_sha_pass", "23863_expanded_file_checksums_pass"]
+          pathlib.Path("VERIFY_REPORT.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+          pathlib.Path("VERIFY_REPORT.sha256").write_text(f"{sha256}  Samguk_Full_Original_SourceBank.zip\n")
+          print("INDEPENDENT_VERIFY_OK", report["total_files"], "files", sha256, flush=True)
+          PY
+      - name: Upload verification report
+        uses: actions/upload-artifact@v4
+        with:
+          name: Samguk-SourceBank-Verification-Report
+          path: |
+            VERIFY_REPORT.json
+            VERIFY_REPORT.sha256
+          retention-days: 30
+          if-no-files-found: error
