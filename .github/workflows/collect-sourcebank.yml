@@ -43,7 +43,7 @@ jobs:
             assert sha.lower().startswith(root.split("-")[-1].lower()),(repo,"commit-root",root)
             names={x.filename for x in files}
             body=z.read(root+"/"+lic)
-            blob=hashlib.sha1(b"blob "+str(len(body)).encode()+b"\\0"+body).hexdigest()
+            blob=hashlib.sha1(b"blob "+str(len(body)).encode()+bytes([0])+body).hexdigest()
             assert blob==licblob,(repo,"license-blob")
             for x in files:
              parts=pathlib.PurePosixPath(x.filename).parts
